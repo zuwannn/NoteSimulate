@@ -1,53 +1,124 @@
+"""
+Hearttopia Music Sequencer v3
+– Real note audio via pygame sine-wave synthesis
+– Beat sequencer grid  (8 / 16 / 32 beats)
+– Text note input  (Do Re Mi … or keyboard keys)
+– Piano keyboard panel (click to hear)
+– Volume + Waveform selector (sine / triangle / square)
+– BPM control
+"""
+
 import sys
 import time
 import threading
+import numpy as np
+
+import pygame
+import pygame.sndarray
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QTextEdit, QPushButton,
-    QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
-    QTableWidgetItem, QScrollArea, QFrame, QSizePolicy,
-    QSpinBox, QComboBox, QGridLayout, QSlider
+    QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
+    QFrame, QSpinBox, QComboBox, QGridLayout, QSlider,
+    QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QPropertyAnimation, QRect
-from PyQt6.QtGui import QColor, QPalette, QFont, QPainter, QPen, QBrush, QLinearGradient, QFontDatabase
+from PyQt6.QtCore import Qt, pyqtSignal, QObject
+from PyQt6.QtGui import QColor, QPalette
 
 from pynput.keyboard import Controller
 
 keyboard = Controller()
 
+# ─────────────────────────────────────────────────────────────────
+#  Audio engine
+# ─────────────────────────────────────────────────────────────────
+SAMPLE_RATE = 44100
 
-# ─────────────────────────────────────────────
-#  Default Hearttopia keyboard map (from screenshot)
-# ─────────────────────────────────────────────
+pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)   # 2 = stereo
+pygame.mixer.init()
+pygame.mixer.set_num_channels(32)
+
+
+# Note frequencies  (C4 = Do, D4 = Re … two octaves)
+NOTE_FREQ = {
+    "Do":   261.63,   # C4
+    "Re":   293.66,   # D4
+    "Mi":   329.63,   # E4
+    "Fa":   349.23,   # F4
+    "Sol":  392.00,   # G4
+    "La":   440.00,   # A4
+    "Si":   493.88,   # B4
+    "Do²":  523.25,   # C5
+}
+
+
+def _make_wave(freq: float, duration: float = 0.45,
+               wave: str = "sine", volume: float = 0.5) -> np.ndarray:
+    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
+    if wave == "sine":
+        samples = np.sin(2 * np.pi * freq * t)
+    elif wave == "triangle":
+        samples = 2 * np.abs(2 * (t * freq - np.floor(t * freq + 0.5))) - 1
+    elif wave == "square":
+        samples = np.sign(np.sin(2 * np.pi * freq * t))
+    else:
+        samples = np.sin(2 * np.pi * freq * t)
+
+    # ADSR envelope  (attack 5 ms, decay 40 ms, sustain 0.7, release 80 ms)
+    n = len(samples)
+    env = np.ones(n)
+    a = int(0.005 * SAMPLE_RATE)
+    d = int(0.040 * SAMPLE_RATE)
+    r = int(0.080 * SAMPLE_RATE)
+    env[:a]    = np.linspace(0, 1, a)
+    env[a:a+d] = np.linspace(1, 0.7, d)
+    env[n-r:]  = np.linspace(0.7, 0, r)
+    samples = samples * env * volume
+
+    mono = (samples * 32767).astype(np.int16)
+    # pygame stereo mixer requires shape (N, 2)
+    return np.column_stack([mono, mono])
+
+
+def build_sound_cache(wave: str = "sine", volume: float = 0.5) -> dict:
+    cache = {}
+    for name, freq in NOTE_FREQ.items():
+        arr = _make_wave(freq, wave=wave, volume=volume)   # shape (N, 2)
+        sound = pygame.sndarray.make_sound(arr)
+        cache[name] = sound
+    return cache
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Hearttopia keyboard map
+# ─────────────────────────────────────────────────────────────────
 DEFAULT_MAP = [
-    # Row 1 – top keyboard row
-    ("Do",  "1", "q"),
-    ("Re",  "2", "w"),
-    ("Mi",  "3", "e"),
-    ("Fa",  "4", "r"),
-    ("Sol", "5", "t"),
-    ("La",  "6", "y"),
-    ("Si",  "7", "u"),
-    ("Do²","1'","i"),   # high octave
-
-    # Row 2 – home row
-    ("Do",  "1", "z"),
-    ("Re",  "2", "x"),
-    ("Mi",  "3", "c"),
-    ("Fa",  "4", "v"),
-    ("Sol", "5", "b"),
-    ("La",  "6", "h"),
-    ("Si",  "7", "j"),
-    ("Si",  "7", "m"),
-
-    # Row 3 – bottom row
-    ("Do",  "1", "l"),
-    ("Re",  "2", ";"),
-    ("Mi",  "3", "/"),
-    ("Fa",  "4", "o"),
-    ("Sol", "5", "p"),
-    ("La",  "6", "["),
-    ("Si",  "7", "]"),
+    # Row 1
+    ("Do",  "1",  "q"),
+    ("Re",  "2",  "w"),
+    ("Mi",  "3",  "e"),
+    ("Fa",  "4",  "r"),
+    ("Sol", "5",  "t"),
+    ("La",  "6",  "y"),
+    ("Si",  "7",  "u"),
+    ("Do²", "1'", "i"),
+    # Row 2
+    ("Do",  "1",  "z"),
+    ("Re",  "2",  "x"),
+    ("Mi",  "3",  "c"),
+    ("Fa",  "4",  "v"),
+    ("Sol", "5",  "b"),
+    ("La",  "6",  "h"),
+    ("Si",  "7",  "j"),
+    ("Si",  "7",  "m"),
+    # Row 3
+    ("Do",  "1",  "l"),
+    ("Re",  "2",  ";"),
+    ("Mi",  "3",  "/"),
+    ("Fa",  "4",  "o"),
+    ("Sol", "5",  "p"),
+    ("La",  "6",  "["),
+    ("Si",  "7",  "]"),
 ]
 
 NOTE_COLORS = {
@@ -61,77 +132,53 @@ NOTE_COLORS = {
     "1'": "#FF6B6B",
 }
 
-SOLFEGE_LABELS = {
+SOLFEGE = {
     "Do": "DO", "Re": "RE", "Mi": "MI",
     "Fa": "FA", "Sol": "SOL", "La": "LA",
     "Si": "SI", "Do²": "DO²",
 }
 
-# ─────────────────────────────────────────────
-#  Signal bridge (thread → UI)
-# ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+#  Qt signal bridge
+# ─────────────────────────────────────────────────────────────────
 class Signals(QObject):
-    note_played   = pyqtSignal(str, str)   # note_name, key
+    note_played   = pyqtSignal(str, str)
     playback_done = pyqtSignal()
-    update_beat   = pyqtSignal(int)        # current beat index
+    update_beat   = pyqtSignal(int)
 
 
-# ─────────────────────────────────────────────
-#  Glowing note button
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+#  Note button (piano panel)
+# ─────────────────────────────────────────────────────────────────
 class NoteButton(QPushButton):
     def __init__(self, note_name, degree, key, parent=None):
         super().__init__(parent)
         self.note_name = note_name
         self.degree    = degree
         self.key       = key
-        self._active   = False
-
-        color = NOTE_COLORS.get(degree, "#ffffff")
-        self.setFixedSize(70, 70)
-        self.setCheckable(False)
-
-        self._base_style = f"""
+        color = NOTE_COLORS.get(degree, "#fff")
+        self.setFixedSize(62, 62)
+        self._base = f"""
             QPushButton {{
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 {color}ee, stop:1 {color}88);
+                    stop:0 {color}dd, stop:1 {color}77);
                 border: 2px solid {color};
-                border-radius: 35px;
-                color: #1a1a2e;
-                font-family: 'Nunito';
-                font-size: 11px;
+                border-radius: 31px;
+                color: #111;
+                font-size: 10px;
                 font-weight: 800;
             }}
-            QPushButton:hover {{
-                background: {color};
-                border: 3px solid white;
-            }}
-            QPushButton:pressed {{
-                background: white;
-            }}
+            QPushButton:hover {{ background:{color}; border:2px solid #fff; }}
+            QPushButton:pressed {{ background:#fff; }}
         """
-        self._active_style = f"""
-            QPushButton {{
-                background: white;
-                border: 3px solid {color};
-                border-radius: 35px;
-                color: #1a1a2e;
-                font-family: 'Nunito';
-                font-size: 11px;
-                font-weight: 800;
-            }}
-        """
-        self.setStyleSheet(self._base_style)
-        self.setText(f"{SOLFEGE_LABELS.get(note_name, note_name)}\n[{key.upper()}]")
-
-    def set_active(self, active: bool):
-        self._active = active
-        self.setStyleSheet(self._active_style if active else self._base_style)
+        self.setStyleSheet(self._base)
+        self.setText(f"{SOLFEGE.get(note_name, note_name)}\n[{key.upper()}]")
 
 
-# ─────────────────────────────────────────────
-#  Beat cell in the sequencer grid
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+#  Beat cell
+# ─────────────────────────────────────────────────────────────────
 class BeatCell(QPushButton):
     def __init__(self, row, col, degree, parent=None):
         super().__init__(parent)
@@ -140,166 +187,149 @@ class BeatCell(QPushButton):
         self.degree  = degree
         self._on     = False
         self._cursor = False
-
-        self.setFixedSize(36, 36)
+        self.setFixedSize(34, 34)
         self.setCheckable(True)
-        self.toggled.connect(self._on_toggle)
+        self.toggled.connect(lambda c: self._set(c))
         self._refresh()
 
-    def _on_toggle(self, checked):
+    def _set(self, checked):
         self._on = checked
         self._refresh()
 
-    def set_cursor(self, active: bool):
-        self._cursor = active
+    def set_cursor(self, v: bool):
+        self._cursor = v
         self._refresh()
 
     def _refresh(self):
-        color   = NOTE_COLORS.get(self.degree, "#888888")
+        c = NOTE_COLORS.get(self.degree, "#888")
         if self._cursor:
-            bg = "white"
-            border = f"3px solid {color}"
+            bg, border = "#ffffff", f"3px solid {c}"
         elif self._on:
-            bg = color
-            border = f"2px solid white"
+            bg, border = c, "2px solid #fff"
         else:
-            bg = "#1e1e3a"
-            border = f"1px solid #3a3a6a"
-
+            bg, border = "#1a1a35", "1px solid #33336a"
         self.setStyleSheet(f"""
             QPushButton {{
-                background: {bg};
-                border: {border};
-                border-radius: 6px;
+                background:{bg}; border:{border}; border-radius:6px;
             }}
             QPushButton:hover {{
-                background: {color}55;
-                border: 2px solid {color};
+                background:{c}44; border:2px solid {c};
             }}
         """)
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 #  Main window
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 class HeartopiaSequencer(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.signals  = Signals()
-        self.running  = False
-        self.beat_idx = 0
-        self.beats    = 16
-        self.bpm      = 120
+        self.signals   = Signals()
+        self.running   = False
+        self.beat_idx  = 0
+        self.beats     = 16
+        self.bpm       = 120
+        self.wave_type = "sine"
+        self.volume    = 0.5
+        self.sounds    = build_sound_cache(self.wave_type, self.volume)
 
-        # build note map: (note_name, degree) → key
-        self.note_map: dict[str, str] = {}
-        for name, deg, key in DEFAULT_MAP:
-            label = f"{name}({key.upper()})"
-            self.note_map[label] = key
-
-        # flat list for sequencer rows
-        self.row_defs = DEFAULT_MAP  # (name, degree, key)
-        self.num_rows = len(self.row_defs)
+        self.row_defs  = DEFAULT_MAP
+        self.cells: list[list[BeatCell]] = []
 
         self._init_ui()
-        self._connect_signals()
+        self._connect()
 
-    # ── UI construction ──────────────────────
+    # ── UI ───────────────────────────────────────────────────────
     def _init_ui(self):
-        self.setWindowTitle("♪ Hearttopia Music Sequencer v2")
-        self.resize(1300, 800)
-
+        self.setWindowTitle("♪ Hearttopia Sequencer v3 — with Audio")
+        self.resize(1380, 860)
         self.setStyleSheet("""
-            QWidget {
-                background-color: #0f0f23;
-                color: #e0e0ff;
-                font-family: 'Nunito', 'Segoe UI', sans-serif;
-            }
-            QScrollArea { border: none; }
-            QLabel { color: #c0c0ee; }
+            QWidget { background:#0d0d20; color:#e0e0ff;
+                      font-family:'Segoe UI',sans-serif; }
+            QScrollArea { border:none; }
+            QLabel { color:#c0c0ee; }
+            QScrollBar:vertical { background:#1a1a35; width:8px; border-radius:4px; }
+            QScrollBar::handle:vertical { background:#44448a; border-radius:4px; }
         """)
 
         root = QVBoxLayout(self)
-        root.setSpacing(12)
-        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+        root.setContentsMargins(14, 14, 14, 14)
 
         # ── Header ──
-        header = QLabel("♪  HEARTTOPIA  MUSIC  SEQUENCER")
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setStyleSheet("""
-            font-size: 22px;
-            font-weight: 900;
-            letter-spacing: 6px;
-            color: #a29bfe;
-            padding: 8px;
+        hdr = QLabel("♪  HEARTTOPIA  MUSIC  SEQUENCER  v3")
+        hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr.setStyleSheet("""
+            font-size:20px; font-weight:900; letter-spacing:5px;
+            color:#a29bfe; padding:6px;
         """)
-        root.addWidget(header)
+        root.addWidget(hdr)
 
-        # ── Transport bar ──
-        transport = QHBoxLayout()
-        transport.setSpacing(12)
+        # ── Transport ──
+        tp = QHBoxLayout()
+        tp.setSpacing(10)
 
-        self.btn_play  = self._mk_btn("▶  PLAY",  "#00b894")
-        self.btn_stop  = self._mk_btn("■  STOP",  "#d63031")
-        self.btn_clear = self._mk_btn("✕  CLEAR", "#636e72")
+        self.btn_play  = self._btn("▶  PLAY",  "#00b894")
+        self.btn_stop  = self._btn("■  STOP",  "#d63031")
+        self.btn_clear = self._btn("✕  CLEAR", "#636e72")
 
-        lbl_bpm = QLabel("BPM")
-        lbl_bpm.setStyleSheet("color:#a29bfe; font-weight:700;")
+        # BPM
+        self._add_label(tp, "BPM")
         self.spin_bpm = QSpinBox()
-        self.spin_bpm.setRange(40, 300)
-        self.spin_bpm.setValue(self.bpm)
-        self.spin_bpm.setFixedWidth(70)
-        self.spin_bpm.setStyleSheet("""
-            QSpinBox {
-                background:#1e1e3a; color:#e0e0ff;
-                border:1px solid #a29bfe; border-radius:6px;
-                padding:4px; font-size:14px; font-weight:700;
-            }
-        """)
+        self.spin_bpm.setRange(40, 300); self.spin_bpm.setValue(120)
+        self.spin_bpm.setFixedWidth(68)
+        self.spin_bpm.setStyleSheet(self._spin_style())
+        tp.addWidget(self.spin_bpm)
 
-        lbl_beats = QLabel("Beats")
-        lbl_beats.setStyleSheet("color:#a29bfe; font-weight:700;")
+        # Beats
+        self._add_label(tp, "Beats")
         self.combo_beats = QComboBox()
-        for b in [8, 16, 32]:
-            self.combo_beats.addItem(str(b))
+        for b in ["8", "16", "32"]:
+            self.combo_beats.addItem(b)
         self.combo_beats.setCurrentIndex(1)
-        self.combo_beats.setFixedWidth(60)
-        self.combo_beats.setStyleSheet("""
-            QComboBox {
-                background:#1e1e3a; color:#e0e0ff;
-                border:1px solid #a29bfe; border-radius:6px;
-                padding:4px; font-size:13px;
-            }
-            QComboBox QAbstractItemView { background:#1e1e3a; color:#e0e0ff; }
+        self.combo_beats.setFixedWidth(58)
+        self.combo_beats.setStyleSheet(self._combo_style())
+        tp.addWidget(self.combo_beats)
+
+        # Waveform
+        self._add_label(tp, "Wave")
+        self.combo_wave = QComboBox()
+        for w in ["sine", "triangle", "square"]:
+            self.combo_wave.addItem(w)
+        self.combo_wave.setFixedWidth(82)
+        self.combo_wave.setStyleSheet(self._combo_style())
+        tp.addWidget(self.combo_wave)
+
+        # Volume
+        self._add_label(tp, "Vol")
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal)
+        self.slider_vol.setRange(0, 100)
+        self.slider_vol.setValue(50)
+        self.slider_vol.setFixedWidth(100)
+        self.slider_vol.setStyleSheet("""
+            QSlider::groove:horizontal { background:#33336a; height:6px; border-radius:3px; }
+            QSlider::handle:horizontal { background:#a29bfe; width:14px; height:14px;
+                                         margin:-4px 0; border-radius:7px; }
+            QSlider::sub-page:horizontal { background:#a29bfe; border-radius:3px; }
         """)
+        tp.addWidget(self.slider_vol)
 
-        transport.addWidget(self.btn_play)
-        transport.addWidget(self.btn_stop)
-        transport.addWidget(self.btn_clear)
-        transport.addStretch()
-        transport.addWidget(lbl_bpm)
-        transport.addWidget(self.spin_bpm)
-        transport.addWidget(lbl_beats)
-        transport.addWidget(self.combo_beats)
+        tp.addStretch()
+        for b in [self.btn_play, self.btn_stop, self.btn_clear]:
+            tp.addWidget(b)
 
-        root.addLayout(transport)
+        root.addLayout(tp)
 
-        # ── Main area: sequencer + text input ──
+        # ── Body ──
         body = QHBoxLayout()
-        body.setSpacing(14)
+        body.setSpacing(12)
 
         # Sequencer grid
-        grid_frame = QFrame()
-        grid_frame.setStyleSheet("""
-            QFrame {
-                background: #12122a;
-                border: 1px solid #2a2a5a;
-                border-radius: 12px;
-            }
-        """)
-        grid_layout = QVBoxLayout(grid_frame)
-        grid_layout.setContentsMargins(10, 10, 10, 10)
+        gf = QFrame()
+        gf.setStyleSheet("QFrame{background:#10102a;border:1px solid #2a2a5a;border-radius:10px;}")
+        gl = QVBoxLayout(gf)
+        gl.setContentsMargins(8, 8, 8, 8)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -308,243 +338,239 @@ class HeartopiaSequencer(QWidget):
         self.grid_widget = QWidget()
         self.grid_widget.setStyleSheet("background:transparent;")
         self.grid_inner  = QGridLayout(self.grid_widget)
-        self.grid_inner.setSpacing(4)
-
-        self.cells: list[list[BeatCell]] = []
-        self._build_grid(self.beats)
+        self.grid_inner.setSpacing(3)
+        self._build_grid(16)
 
         scroll.setWidget(self.grid_widget)
-        grid_layout.addWidget(scroll)
-
-        body.addWidget(grid_frame, 3)
+        gl.addWidget(scroll)
+        body.addWidget(gf, 3)
 
         # Right panel
         right = QVBoxLayout()
         right.setSpacing(10)
 
-        # Text note input
-        note_frame = QFrame()
-        note_frame.setStyleSheet("""
-            QFrame { background:#12122a; border:1px solid #2a2a5a; border-radius:12px; }
-        """)
-        note_layout = QVBoxLayout(note_frame)
-
-        lbl_input = QLabel("♩  Text Note Input  (e.g.  Do Re Mi Fa Sol)")
-        lbl_input.setStyleSheet("font-size:12px; color:#a29bfe; font-weight:700;")
+        # Text input
+        tf = self._frame()
+        tl = QVBoxLayout(tf)
+        tl.addWidget(self._lbl("♩  Text Note Input  (e.g.  Do Re Mi Fa Sol  or  q w e r t)"))
         self.note_input = QTextEdit()
         self.note_input.setPlaceholderText(
-            "พิมพ์ชื่อ note เช่น:\nDo Re Mi Fa Sol La Si Do²\n\n"
-            "หรือใช้ key เช่น:\nq w e r t y u i"
+            "Do Re Mi Fa Sol La Si Do²\n"
+            "หรือ: q w e r t y u i"
         )
-        self.note_input.setMaximumHeight(110)
+        self.note_input.setMaximumHeight(90)
         self.note_input.setStyleSheet("""
-            QTextEdit {
-                background:#0f0f23; color:#e0e0ff;
-                border:1px solid #3a3a6a; border-radius:8px;
-                font-size:13px; padding:6px;
-            }
+            QTextEdit { background:#0a0a1a; color:#e0e0ff;
+                        border:1px solid #3a3a6a; border-radius:7px;
+                        font-size:13px; padding:5px; }
         """)
-
-        self.btn_send = self._mk_btn("▶  Play Text Sequence", "#6c5ce7")
-        note_layout.addWidget(lbl_input)
-        note_layout.addWidget(self.note_input)
-        note_layout.addWidget(self.btn_send)
-        right.addWidget(note_frame)
+        self.btn_send = self._btn("▶  Play Text", "#6c5ce7")
+        tl.addWidget(self.note_input)
+        tl.addWidget(self.btn_send)
+        right.addWidget(tf)
 
         # Log
-        log_frame = QFrame()
-        log_frame.setStyleSheet("""
-            QFrame { background:#12122a; border:1px solid #2a2a5a; border-radius:12px; }
-        """)
-        log_layout = QVBoxLayout(log_frame)
-        lbl_log = QLabel("📋  Activity Log")
-        lbl_log.setStyleSheet("font-size:12px; color:#a29bfe; font-weight:700;")
+        lf = self._frame()
+        ll = QVBoxLayout(lf)
+        ll.addWidget(self._lbl("📋  Activity Log"))
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setStyleSheet("""
-            QTextEdit {
-                background:#0a0a1a; color:#74b9ff;
-                border:1px solid #3a3a6a; border-radius:8px;
-                font-family: 'Courier New'; font-size:12px; padding:6px;
-            }
+            QTextEdit { background:#080817; color:#74b9ff;
+                        border:1px solid #3a3a6a; border-radius:7px;
+                        font-family:'Courier New'; font-size:11px; padding:5px; }
         """)
-        log_layout.addWidget(lbl_log)
-        log_layout.addWidget(self.log_box)
-        right.addWidget(log_frame, 1)
+        ll.addWidget(self.log_box)
+        right.addWidget(lf, 1)
 
-        # Note keyboard reference
-        kb_frame = QFrame()
-        kb_frame.setStyleSheet("""
-            QFrame { background:#12122a; border:1px solid #2a2a5a; border-radius:12px; }
-        """)
-        kb_layout = QVBoxLayout(kb_frame)
-        lbl_kb = QLabel("🎹  Hearttopia Key Map")
-        lbl_kb.setStyleSheet("font-size:12px; color:#a29bfe; font-weight:700;")
-        kb_layout.addWidget(lbl_kb)
-
-        kb_grid = QGridLayout()
-        kb_grid.setSpacing(4)
-        shown = {}
-        col = 0
+        # Piano keyboard
+        kf = self._frame()
+        kl = QVBoxLayout(kf)
+        kl.addWidget(self._lbl("🎹  Click to Play"))
+        kg = QGridLayout()
+        kg.setSpacing(4)
+        shown, col = {}, 0
         for name, deg, key in DEFAULT_MAP:
             if key in shown:
                 continue
             shown[key] = True
-            btn = NoteButton(name, deg, key)
-            btn.setFixedSize(58, 58)
-            btn.clicked.connect(lambda _, k=key, n=name, d=deg: self._manual_press(k, n, d))
-            kb_grid.addWidget(btn, 0 if col < 8 else (1 if col < 16 else 2), col % 8)
+            nb = NoteButton(name, deg, key)
+            nb.clicked.connect(lambda _, n=name, d=deg, k=key: self._manual(n, d, k))
+            row_pos = 0 if col < 8 else (1 if col < 16 else 2)
+            kg.addWidget(nb, row_pos, col % 8)
             col += 1
-
-        kb_layout.addLayout(kb_grid)
-        right.addWidget(kb_frame)
+        kl.addLayout(kg)
+        right.addWidget(kf)
 
         body.addLayout(right, 2)
         root.addLayout(body, 1)
 
+    # ── Grid builder ─────────────────────────────────────────────
     def _build_grid(self, beats: int):
-        # clear
-        for r in self.cells:
-            for c in r:
+        for row in self.cells:
+            for c in row:
                 c.deleteLater()
         self.cells.clear()
-
         while self.grid_inner.count():
             item = self.grid_inner.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
         self.beats = beats
-
-        # Beat number headers
         for col in range(beats):
             lbl = QLabel(str(col + 1))
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setFixedWidth(36)
-            lbl.setStyleSheet("color:#555588; font-size:10px;")
+            lbl.setFixedWidth(34)
+            lbl.setStyleSheet("color:#44448a; font-size:9px;")
             self.grid_inner.addWidget(lbl, 0, col + 1)
 
-        for row_idx, (name, deg, key) in enumerate(self.row_defs):
-            # Row label
+        for r, (name, deg, key) in enumerate(self.row_defs):
             color = NOTE_COLORS.get(deg, "#888")
-            lbl = QLabel(f"{SOLFEGE_LABELS.get(name, name)}\n[{key.upper()}]")
-            lbl.setFixedWidth(54)
+            lbl = QLabel(f"{SOLFEGE.get(name, name)}\n[{key.upper()}]")
+            lbl.setFixedWidth(50)
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            lbl.setStyleSheet(f"color:{color}; font-size:10px; font-weight:700;")
-            self.grid_inner.addWidget(lbl, row_idx + 1, 0)
-
+            lbl.setStyleSheet(f"color:{color}; font-size:9px; font-weight:700;")
+            self.grid_inner.addWidget(lbl, r + 1, 0)
             row_cells = []
             for col in range(beats):
-                cell = BeatCell(row_idx, col, deg)
-                self.grid_inner.addWidget(cell, row_idx + 1, col + 1)
+                cell = BeatCell(r, col, deg)
+                self.grid_inner.addWidget(cell, r + 1, col + 1)
                 row_cells.append(cell)
             self.cells.append(row_cells)
 
-    # ── Helpers ──────────────────────────────
-    def _mk_btn(self, text, color):
-        btn = QPushButton(text)
-        btn.setFixedHeight(36)
-        btn.setStyleSheet(f"""
+    # ── Helpers ──────────────────────────────────────────────────
+    def _btn(self, text, color):
+        b = QPushButton(text)
+        b.setFixedHeight(34)
+        b.setStyleSheet(f"""
             QPushButton {{
-                background: {color}33;
-                color: {color};
-                border: 1px solid {color};
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 700;
-                padding: 0 16px;
+                background:{color}30; color:{color};
+                border:1px solid {color}; border-radius:7px;
+                font-size:12px; font-weight:700; padding:0 14px;
             }}
-            QPushButton:hover {{
-                background: {color}88;
-                color: white;
-            }}
-            QPushButton:pressed {{
-                background: {color};
-                color: #0f0f23;
-            }}
+            QPushButton:hover {{ background:{color}80; color:#fff; }}
+            QPushButton:pressed {{ background:{color}; color:#0d0d20; }}
         """)
-        return btn
+        return b
 
-    def _connect_signals(self):
-        self.btn_play.clicked.connect(self.start_sequencer)
+    def _frame(self):
+        f = QFrame()
+        f.setStyleSheet("QFrame{background:#10102a;border:1px solid #2a2a5a;border-radius:10px;}")
+        return f
+
+    def _lbl(self, text):
+        l = QLabel(text)
+        l.setStyleSheet("font-size:11px; color:#a29bfe; font-weight:700;")
+        return l
+
+    def _add_label(self, layout, text):
+        l = QLabel(text)
+        l.setStyleSheet("color:#a29bfe; font-weight:700; font-size:12px;")
+        layout.addWidget(l)
+
+    def _spin_style(self):
+        return """QSpinBox { background:#1a1a38; color:#e0e0ff;
+                   border:1px solid #a29bfe; border-radius:5px;
+                   padding:3px; font-size:13px; font-weight:700; }"""
+
+    def _combo_style(self):
+        return """QComboBox { background:#1a1a38; color:#e0e0ff;
+                   border:1px solid #a29bfe; border-radius:5px;
+                   padding:3px; font-size:12px; }
+                  QComboBox QAbstractItemView { background:#1a1a38; color:#e0e0ff; }"""
+
+    # ── Connections ──────────────────────────────────────────────
+    def _connect(self):
+        self.btn_play.clicked.connect(self.start_seq)
         self.btn_stop.clicked.connect(self.stop_all)
         self.btn_clear.clicked.connect(self.clear_grid)
-        self.btn_send.clicked.connect(self.play_text_sequence)
+        self.btn_send.clicked.connect(self.play_text)
+
         self.combo_beats.currentTextChanged.connect(
-            lambda t: self._build_grid(int(t))
-        )
+            lambda t: self._build_grid(int(t)))
         self.spin_bpm.valueChanged.connect(lambda v: setattr(self, 'bpm', v))
+        self.combo_wave.currentTextChanged.connect(self._on_wave_change)
+        self.slider_vol.valueChanged.connect(self._on_vol_change)
 
-        self.signals.note_played.connect(self._on_note_played)
+        self.signals.note_played.connect(self._on_note)
         self.signals.playback_done.connect(self._on_done)
-        self.signals.update_beat.connect(self._advance_cursor)
+        self.signals.update_beat.connect(self._advance)
 
-    # ── Grid sequencer ───────────────────────
-    def start_sequencer(self):
+    def _on_wave_change(self, wave):
+        self.wave_type = wave
+        self.sounds = build_sound_cache(self.wave_type, self.volume)
+
+    def _on_vol_change(self, val):
+        self.volume = val / 100.0
+        self.sounds = build_sound_cache(self.wave_type, self.volume)
+
+    # ── Play sound ───────────────────────────────────────────────
+    def _play_sound(self, note_name: str):
+        sound = self.sounds.get(note_name)
+        if sound:
+            sound.play()
+
+    # ── Grid sequencer ───────────────────────────────────────────
+    def start_seq(self):
         if self.running:
             return
-        self.running  = True
+        self.running = True
         self.beat_idx = 0
-        threading.Thread(target=self._run_sequencer, daemon=True).start()
+        threading.Thread(target=self._run_seq, daemon=True).start()
 
-    def _run_sequencer(self):
-        interval = 60.0 / self.bpm / 1  # quarter note
-
+    def _run_seq(self):
         while self.running:
             col = self.beat_idx % self.beats
             self.signals.update_beat.emit(col)
+            interval = 60.0 / self.bpm
 
-            for row_idx, (name, deg, key) in enumerate(self.row_defs):
-                cell = self.cells[row_idx][col]
-                if cell._on:
+            for r, (name, deg, key) in enumerate(self.row_defs):
+                if self.cells[r][col]._on:
+                    self._play_sound(name)
                     keyboard.press(key)
                     keyboard.release(key)
                     self.signals.note_played.emit(
-                        f"{SOLFEGE_LABELS.get(name, name)}({key.upper()})", key
-                    )
+                        f"{SOLFEGE.get(name, name)}({key.upper()})", key)
 
             self.beat_idx += 1
             time.sleep(interval)
 
-    def _advance_cursor(self, col: int):
-        prev_col = (col - 1) % self.beats
+    def _advance(self, col: int):
+        prev = (col - 1) % self.beats
         for row in self.cells:
-            row[prev_col].set_cursor(False)
+            row[prev].set_cursor(False)
             row[col].set_cursor(True)
 
     def stop_all(self):
         self.running = False
-        # clear cursors
         for row in self.cells:
-            for cell in row:
-                cell.set_cursor(False)
+            for c in row:
+                c.set_cursor(False)
         self.log_box.append("■ Stopped.")
 
     def clear_grid(self):
         for row in self.cells:
-            for cell in row:
-                if cell._on:
-                    cell.setChecked(False)
+            for c in row:
+                if c._on:
+                    c.setChecked(False)
 
-    # ── Text sequence player ─────────────────
-    def play_text_sequence(self):
+    # ── Text sequence ─────────────────────────────────────────────
+    def play_text(self):
         if self.running:
             return
         self.running = True
-        threading.Thread(target=self._play_text, daemon=True).start()
+        threading.Thread(target=self._run_text, daemon=True).start()
 
-    def _play_text(self):
-        text   = self.note_input.toPlainText().strip()
-        tokens = text.split()
-
-        # Build lookup: name → key  AND  key → key
-        lookup: dict[str, tuple[str, str]] = {}
+    def _run_text(self):
+        # Build lookup:  token → (display_label, note_name, key)
+        lookup: dict[str, tuple[str, str, str]] = {}
         for name, deg, key in DEFAULT_MAP:
-            sol = SOLFEGE_LABELS.get(name, name)
-            lookup[sol.lower()]  = (sol, key)
-            lookup[name.lower()] = (sol, key)
-            lookup[key.lower()]  = (sol, key)
+            sol = SOLFEGE.get(name, name)
+            for alias in [sol.lower(), name.lower(), key.lower()]:
+                if alias not in lookup:
+                    lookup[alias] = (sol, name, key)
 
+        tokens   = self.note_input.toPlainText().split()
         interval = 60.0 / self.bpm
 
         for token in tokens:
@@ -552,7 +578,8 @@ class HeartopiaSequencer(QWidget):
                 break
             entry = lookup.get(token.lower())
             if entry:
-                label, key = entry
+                label, note_name, key = entry
+                self._play_sound(note_name)
                 keyboard.press(key)
                 keyboard.release(key)
                 self.signals.note_played.emit(label, key)
@@ -563,47 +590,44 @@ class HeartopiaSequencer(QWidget):
         self.running = False
         self.signals.playback_done.emit()
 
-    # ── Manual key press from piano buttons ──
-    def _manual_press(self, key, name, deg):
+    # ── Manual piano press ────────────────────────────────────────
+    def _manual(self, name, deg, key):
+        self._play_sound(name)
         keyboard.press(key)
         keyboard.release(key)
         self.signals.note_played.emit(
-            f"{SOLFEGE_LABELS.get(name, name)}({key.upper()})", key
-        )
+            f"{SOLFEGE.get(name, name)}({key.upper()})", key)
 
-    # ── Signal handlers ──────────────────────
-    def _on_note_played(self, label, key):
-        color = "#74b9ff"
+    # ── Log handlers ──────────────────────────────────────────────
+    def _on_note(self, label, key):
         self.log_box.append(
-            f'<span style="color:{color}">♩ {label}</span>'
-            f'<span style="color:#636e72;"> → [{key.upper()}]</span>'
+            f'<span style="color:#74b9ff">♩ {label}</span>'
+            f'<span style="color:#555577"> → [{key.upper()}]</span>'
         )
-        # auto-scroll
         sb = self.log_box.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def _on_done(self):
-        self.log_box.append('<span style="color:#00b894">✓ Sequence complete.</span>')
+        self.log_box.append('<span style="color:#00b894">✓ Done.</span>')
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 #  Entry point
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # dark palette
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window,          QColor("#0f0f23"))
-    palette.setColor(QPalette.ColorRole.WindowText,      QColor("#e0e0ff"))
-    palette.setColor(QPalette.ColorRole.Base,            QColor("#12122a"))
-    palette.setColor(QPalette.ColorRole.AlternateBase,   QColor("#1a1a3a"))
-    palette.setColor(QPalette.ColorRole.Text,            QColor("#e0e0ff"))
-    palette.setColor(QPalette.ColorRole.Button,          QColor("#1e1e3a"))
-    palette.setColor(QPalette.ColorRole.ButtonText,      QColor("#e0e0ff"))
-    app.setPalette(palette)
+    pal = QPalette()
+    pal.setColor(QPalette.ColorRole.Window,        QColor("#0d0d20"))
+    pal.setColor(QPalette.ColorRole.WindowText,    QColor("#e0e0ff"))
+    pal.setColor(QPalette.ColorRole.Base,          QColor("#10102a"))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#1a1a38"))
+    pal.setColor(QPalette.ColorRole.Text,          QColor("#e0e0ff"))
+    pal.setColor(QPalette.ColorRole.Button,        QColor("#1a1a38"))
+    pal.setColor(QPalette.ColorRole.ButtonText,    QColor("#e0e0ff"))
+    app.setPalette(pal)
 
-    window = HeartopiaSequencer()
-    window.show()
+    win = HeartopiaSequencer()
+    win.show()
     sys.exit(app.exec())
